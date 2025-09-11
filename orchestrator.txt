@@ -1,0 +1,550 @@
+#!/usr/bin/env python3
+"""
+Lightweight profile-based Docker orchestrator for Magento dev.
+
+Profiles:
+  - minimal: php, db, search
+  - full:    php, db, search, nginx, redis
+
+Key features:
+  - Creates .env with defaults if missing (with pre-commented MySQL/Elasticsearch alternatives).
+  - Generates docker-compose.yaml from the selected profile.
+  - Optionally brings the stack up/down and shows status.
+  - Autogenerates a Magento-friendly Nginx default.conf for 'full' profile.
+  - Seeds ./src/index.php (phpinfo) if empty to validate wiring quickly.
+  - Auto-detects search engine flavor (OpenSearch vs Elasticsearch) from SEARCH_IMAGE.
+
+Usage examples:
+  python orchestrator.py up --profile full
+  python orchestrator.py up --profile minimal
+  python orchestrator.py generate --profile full
+  python orchestrator.py status
+  python orchestrator.py down
+
+One-time dependency:
+  pip install pyyaml
+"""
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+from textwrap import dedent
+from typing import Dict, List, Tuple
+
+# -------------------------------
+# Defaults (used to bootstrap .env and Nginx config when missing)
+# -------------------------------
+
+DEFAULT_ENV = dedent("""\
+# -------- Project prefix / naming --------
+# Compose project name (prefixes containers & network)
+COMPOSE_PROJECT_NAME=magedev
+
+# -------- Host & ports --------
+# Where you'll reach the site (full profile only)
+SITE_HOST=127.0.0.1
+APP_PORT=81
+
+# Optional: Expose service ports to host (helpful for tooling/inspection)
+DB_PORT=3316
+SEARCH_PORT=9201
+REDIS_PORT=6381
+
+# -------- Images (override with your own custom images if desired) --------
+# PHP image (must include Magento-required extensions if custom)
+PHP_IMAGE=php:8.2-fpm
+
+# Database image (switch by commenting/uncommenting)
+# DB_IMAGE=mariadb:10.6
+DB_IMAGE=mysql:8.0
+
+# Search engine image (switch by commenting/uncommenting)
+# SEARCH_IMAGE=opensearchproject/opensearch:2.11.0
+SEARCH_IMAGE=docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+
+# Web server image
+NGINX_IMAGE=nginx:alpine
+
+# Cache image
+REDIS_IMAGE=redis:alpine
+
+# -------- Database credentials --------
+MYSQL_ROOT_PASSWORD=root
+MYSQL_DATABASE=magento
+MYSQL_USER=magento
+MYSQL_PASSWORD=magento
+
+# -------- Search JVM heap (tune as needed) --------
+# Preferred generic knob for either OpenSearch or Elasticsearch (mapped appropriately).
+SEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+
+# Back-compat/fine-grain knobs (optional; SEARCH_JAVA_OPTS takes precedence if set):
+# OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+# ES_JAVA_OPTS=-Xms512m -Xmx512m
+""")
+
+DEFAULT_NGINX_CONF = dedent("""\
+server {
+    listen 80;
+    server_name _;
+    root /var/www/html/pub;
+    index index.php index.html;
+
+    # Basic security headers (dev-friendly)
+    add_header X-Content-Type-Options nosniff;
+    add_header X-Frame-Options SAMEORIGIN;
+
+    # Let Magento front controller handle non-existent files
+    location / {
+        try_files $uri $uri/ /index.php$is_args$args;
+    }
+
+    # Static assets
+    location ~* \\.(jpg|jpeg|png|gif|css|js|ico|svg|webp|avif)$ {
+        try_files $uri =404;
+        expires 1h;
+        access_log off;
+    }
+
+    # Media and static handlers (Magento conventions)
+    location /media/ {
+        try_files $uri $uri/ /get.php?$args;
+    }
+
+    location /static/ {
+        try_files $uri $uri/ /static.php?resource=$uri&$args;
+    }
+
+    # PHP-FPM
+    location ~ \\.php$ {
+        try_files $uri =404;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        fastcgi_param DOCUMENT_ROOT $realpath_root;
+        fastcgi_pass php:9000;
+        fastcgi_index index.php;
+
+        # Helpful dev overrides (adjust as needed)
+        fastcgi_param PHP_VALUE "memory_limit=2G\\nmax_execution_time=1800\\nupload_max_filesize=64M\\npost_max_size=64M";
+    }
+
+    # Deny access to sensitive files
+    location ~* (\\.git|\\.env|composer\\.(json|lock)|auth\\.json|package\\.json|phpunit\\.xml) {
+        deny all;
+    }
+}
+""")
+
+PROFILES: Dict[str, Tuple[str, ...]] = {
+    "minimal": ("php", "db", "search"),
+    "full":    ("php", "db", "search", "nginx", "redis"),
+}
+
+# -------------------------------
+# Small console helpers
+# -------------------------------
+
+def info(msg: str) -> None:
+    """Print an informational message to stdout."""
+    print(f"[INFO] {msg}")
+
+def warn(msg: str) -> None:
+    """Print a warning message to stdout."""
+    print(f"[WARN] {msg}")
+
+def fail(msg: str) -> None:
+    """Print an error message and exit the program."""
+    print(f"[ERROR] {msg}")
+    sys.exit(1)
+
+# -------------------------------
+# Filesystem helpers
+# -------------------------------
+
+def load_env(env_path: Path) -> Dict[str, str]:
+    """
+    Load a very simple KEY=VALUE .env file.
+
+    - Ignores blank lines and comments ('#' at line start).
+    - Does not handle complex quoting/escaping; this is intentionally minimal
+      to keep dependencies low and improve readability.
+
+    Args:
+        env_path: Path to the .env file.
+
+    Returns:
+        Dict[str, str]: Mapping of environment keys to values.
+    """
+    env: Dict[str, str] = {}
+    if not env_path.exists():
+        return env
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        env[key.strip()] = val.strip()
+    return env
+
+def ensure_env_file(env_path: Path) -> None:
+    """
+    Create a default .env file if it does not exist, using DEFAULT_ENV.
+    This makes first-run experience zero-config for local dev.
+
+    Args:
+        env_path: Path to write the .env file to.
+    """
+    if env_path.exists():
+        return
+    env_path.write_text(DEFAULT_ENV, encoding="utf-8")
+    info(f"Created default .env at {env_path}")
+
+def ensure_nginx_conf() -> Path:
+    """
+    Ensure that nginx/conf.d/default.conf exists with a Magento-friendly server block.
+
+    Returns:
+        Path: The path to the Nginx default.conf created or found.
+    """
+    conf_dir = Path("./nginx/conf.d")
+    conf_file = conf_dir / "default.conf"
+    if conf_file.exists():
+        return conf_file
+    conf_dir.mkdir(parents=True, exist_ok=True)
+    conf_file.write_text(DEFAULT_NGINX_CONF, encoding="utf-8")
+    info(f"Created default Nginx config at {conf_file}")
+    return conf_file
+
+def ensure_src_stub() -> None:
+    """
+    Create a tiny stub index.php if ./src is missing or empty.
+    This is non-destructive and helps validate Nginx ↔ PHP wiring quickly.
+    """
+    src = Path("./src")
+    src.mkdir(parents=True, exist_ok=True)
+    if any(src.iterdir()):
+        return
+    (src / "index.php").write_text("<?php phpinfo();", encoding="utf-8")
+    info("Created ./src/index.php stub (directory was empty)")
+
+def require_pyyaml() -> None:
+    """
+    Ensure that the 'yaml' module (PyYAML) is importable.
+    If missing, instruct the user how to install it and exit.
+    """
+    try:
+        import yaml  # noqa: F401
+    except ImportError:
+        fail("Missing dependency 'PyYAML'. Install with:  pip install pyyaml")
+
+# -------------------------------
+# Helpers: detect flavors & pick JVM opts
+# -------------------------------
+
+def detect_search_flavor(search_image: str) -> str:
+    """
+    Detect whether the given search image corresponds to OpenSearch or Elasticsearch.
+
+    Args:
+        search_image: The image string from .env, e.g., 'opensearchproject/opensearch:2.11.0'.
+
+    Returns:
+        str: 'opensearch' or 'elasticsearch'.
+    """
+    img = (search_image or "").lower()
+    if "elasticsearch" in img:
+        return "elasticsearch"
+    return "opensearch"
+
+def resolve_search_jvm_opts(env: Dict[str, str], flavor: str) -> Dict[str, str]:
+    """
+    Resolve the correct JVM environment variable for the selected search engine flavor.
+
+    Priority:
+      1) SEARCH_JAVA_OPTS (generic, preferred)
+      2) Flavor-specific: ES_JAVA_OPTS or OPENSEARCH_JAVA_OPTS
+      3) Fallback: '-Xms512m -Xmx512m'
+
+    Args:
+        env: The loaded .env mapping.
+        flavor: 'elasticsearch' or 'opensearch'.
+
+    Returns:
+        Dict[str, str]: A single-item mapping for the correct env var name to use.
+    """
+    generic = env.get("SEARCH_JAVA_OPTS")
+    if flavor == "elasticsearch":
+        specific = env.get("ES_JAVA_OPTS") or env.get("OPENSEARCH_JAVA_OPTS")
+        value = (generic or specific or "-Xms512m -Xmx512m")
+        return {"ES_JAVA_OPTS": value}
+    else:
+        specific = env.get("OPENSEARCH_JAVA_OPTS") or env.get("ES_JAVA_OPTS")
+        value = (generic or specific or "-Xms512m -Xmx512m")
+        return {"OPENSEARCH_JAVA_OPTS": value}
+
+# -------------------------------
+# Compose generation
+# -------------------------------
+
+def build_compose(env: Dict[str, str], profile: str) -> Dict:
+    """
+    Build an in-memory Compose (v3.9) model for the selected profile.
+
+    Values are inlined from .env so the generated docker-compose.yaml remains
+    explicit and portable.
+
+    Args:
+        env: Effective environment mapping (from .env).
+        profile: One of PROFILES keys (e.g., 'minimal', 'full').
+
+    Returns:
+        dict: A Python dictionary representing a docker-compose document.
+    """
+    if profile not in PROFILES:
+        raise ValueError(f"Unknown profile '{profile}'. Available: {list(PROFILES.keys())}")
+
+    services: Dict[str, Dict] = {}
+
+    # Candidate named volumes. We'll only include ones that are actually used.
+    volume_candidates = {
+        "dbdata": {},
+        "searchdata": {},
+        "rediscache": {},
+    }
+
+    # php (FPM)
+    if "php" in PROFILES[profile]:
+        services["php"] = {
+            "image": env.get("PHP_IMAGE", "php:8.2-fpm"),
+            "working_dir": "/var/www/html",
+            "volumes": [
+                "./src:/var/www/html",
+            ],
+            "depends_on": [],
+            "restart": "unless-stopped",
+        }
+
+    # db
+    if "db" in PROFILES[profile]:
+        services["db"] = {
+            "image": env.get("DB_IMAGE", "mariadb:10.6"),
+            "environment": {
+                # MySQL & MariaDB both support these vars.
+                "MYSQL_ROOT_PASSWORD": env.get("MYSQL_ROOT_PASSWORD", "root"),
+                "MYSQL_DATABASE": env.get("MYSQL_DATABASE", "magento"),
+                "MYSQL_USER": env.get("MYSQL_USER", "magento"),
+                "MYSQL_PASSWORD": env.get("MYSQL_PASSWORD", "magento"),
+            },
+            "volumes": ["dbdata:/var/lib/mysql"],
+            "ports": [f"{env.get('DB_PORT', '3316')}:3306"],
+            "restart": "unless-stopped",
+        }
+        if "php" in services:
+            services["php"]["depends_on"].append("db")
+
+    # search (OpenSearch or Elasticsearch)
+    if "search" in PROFILES[profile]:
+        search_image = env.get("SEARCH_IMAGE", "opensearchproject/opensearch:2.11.0")
+        flavor = detect_search_flavor(search_image)
+
+        # Common bits
+        search_env = {
+            "discovery.type": "single-node",
+        }
+        search_env.update(resolve_search_jvm_opts(env, flavor))
+
+        svc: Dict = {
+            "image": search_image,
+            "environment": search_env,
+            "volumes": ["searchdata:/usr/share/opensearch/data"] if flavor == "opensearch" else [],
+            "ports": [f"{env.get('SEARCH_PORT', '9201')}:9200"],
+            "restart": "unless-stopped",
+        }
+
+        # OpenSearch prefers memlock ulimit for performance
+        if flavor == "opensearch":
+            svc["ulimits"] = {"memlock": {"soft": -1, "hard": -1}}
+        else:
+            # Elasticsearch 8 enables security by default; disable for dev convenience.
+            # (Avoids passwords/certs. Do not use in production.)
+            svc["environment"]["xpack.security.enabled"] = "false"
+
+        services["search"] = svc
+
+        if "php" in services:
+            services["php"]["depends_on"].append("search")
+
+    # nginx (only in 'full')
+    if "nginx" in PROFILES[profile]:
+        ensure_nginx_conf()
+        ensure_src_stub()
+        services["nginx"] = {
+            "image": env.get("NGINX_IMAGE", "nginx:alpine"),
+            "ports": [f"{env.get('APP_PORT', '81')}:80"],
+            "volumes": [
+                "./src:/var/www/html:ro",
+                "./nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf:ro",
+            ],
+            "depends_on": ["php"],
+            "restart": "unless-stopped",
+        }
+
+    # redis (optional but helpful for Magento perf)
+    if "redis" in PROFILES[profile]:
+        services["redis"] = {
+            "image": env.get("REDIS_IMAGE", "redis:alpine"),
+            "volumes": ["rediscache:/data"],
+            "ports": [f"{env.get('REDIS_PORT', '6381')}:6379"],
+            "restart": "unless-stopped",
+        }
+        if "php" in services:
+            services["php"]["depends_on"].append("redis")
+
+    # Prune unused volumes (only include ones that are referenced by a service)
+    used_volume_names = set()
+    for svc in services.values():
+        for mount in svc.get("volumes", []) or []:
+            # Named volume mounts look like "name:/path"
+            if isinstance(mount, str) and ":" in mount and not mount.startswith("."):
+                vol_name = mount.split(":", 1)[0]
+                used_volume_names.add(vol_name)
+
+    volumes = {name: volume_candidates[name] for name in used_volume_names if name in volume_candidates}
+
+    compose = {
+        "version": "3.9",
+        # Compose v2 supports top-level 'name'; acts like COMPOSE_PROJECT_NAME.
+        "name": env.get("COMPOSE_PROJECT_NAME", "magedev"),
+        "services": services,
+        "volumes": volumes,
+    }
+    return compose
+
+def write_compose_file(compose: Dict, path: Path) -> None:
+    """
+    Serialize a Compose python dictionary to YAML on disk.
+
+    Args:
+        compose: The Compose model built by build_compose().
+        path: Destination path for docker-compose.yaml.
+    """
+    require_pyyaml()
+    import yaml  # type: ignore
+    with path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(compose, f, sort_keys=False)
+    info(f"Wrote {path}")
+
+# -------------------------------
+# Orchestration helpers
+# -------------------------------
+
+def docker_compose_cmd(args: List[str]) -> int:
+    """
+    Execute a docker compose CLI command with the current working directory.
+
+    Args:
+        args: A list of arguments, e.g., ["up", "-d"].
+
+    Returns:
+        int: The subprocess return code.
+    """
+    cmd = ["docker", "compose"] + args
+    info(" ".join(cmd))
+    return subprocess.call(cmd)
+
+def do_generate(profile: str, env: Dict[str, str]) -> None:
+    """
+    Generate docker-compose.yaml for the requested profile (no containers started).
+
+    Args:
+        profile: Selected profile (e.g., 'minimal', 'full').
+        env: Env mapping from .env.
+    """
+    compose = build_compose(env, profile)
+    write_compose_file(compose, Path("docker-compose.yaml"))
+    if "nginx" in PROFILES[profile]:
+        ensure_nginx_conf()
+
+def do_up(profile: str, env: Dict[str, str]) -> None:
+    """
+    Generate docker-compose.yaml and bring the stack online.
+
+    Args:
+        profile: Selected profile.
+        env: Env mapping from .env.
+    """
+    do_generate(profile, env)
+    rc = docker_compose_cmd(["up", "-d", "--remove-orphans"])
+    if rc != 0:
+        fail("docker compose up failed.")
+    if "nginx" in PROFILES[profile]:
+        site_host = env.get("SITE_HOST", "127.0.0.1")
+        app_port = env.get("APP_PORT", "81")
+        info(f"Site should be reachable at: http://{site_host}:{app_port}/")
+    else:
+        info("Minimal profile is up (no HTTP). Use Magento CLI inside the 'php' container.")
+
+def do_down() -> None:
+    """
+    Stop and remove the stack, including named volumes (dbdata, searchdata, rediscache).
+    """
+    rc = docker_compose_cmd(["down", "-v"])
+    if rc != 0:
+        fail("docker compose down failed.")
+    info("Stack stopped and volumes removed.")
+
+def do_status() -> None:
+    """
+    Show docker compose service status (equivalent to `docker compose ps`).
+    """
+    rc = docker_compose_cmd(["ps"])
+    sys.exit(rc)
+
+# -------------------------------
+# CLI entrypoint
+# -------------------------------
+
+def main() -> None:
+    """
+    Parse CLI args, ensure .env, load env, and dispatch to the selected command.
+
+    Default behavior with no arguments is to 'up' the 'full' profile for convenience.
+    """
+    parser = argparse.ArgumentParser(description="Profile-based Docker orchestrator for Magento dev")
+    sub = parser.add_subparsers(dest="cmd")
+
+    p_gen = sub.add_parser("generate", help="Generate docker-compose.yaml (no up)")
+    p_gen.add_argument("--profile", choices=PROFILES.keys(), default="full")
+
+    p_up = sub.add_parser("up", help="Generate and start the stack")
+    p_up.add_argument("--profile", choices=PROFILES.keys(), default="full")
+
+    sub.add_parser("down", help="Stop and remove the stack (including volumes)")
+    sub.add_parser("status", help="Show docker compose status")
+
+    # Default action = up (for convenience)
+    if len(sys.argv) == 1:
+        sys.argv += ["up", "--profile", "full"]
+
+    args = parser.parse_args()
+
+    env_path = Path(".env")
+    ensure_env_file(env_path)
+    env = load_env(env_path)
+
+    if args.cmd == "generate":
+        do_generate(args.profile, env)  # type: ignore[attr-defined]
+    elif args.cmd == "up":
+        do_up(args.profile, env)        # type: ignore[attr-defined]
+    elif args.cmd == "down":
+        do_down()
+    elif args.cmd == "status":
+        do_status()
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
