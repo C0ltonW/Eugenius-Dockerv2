@@ -4,7 +4,7 @@ from pathlib import Path
 from .constants import PROFILES
 from .env import ensure_env_file, load_env
 from .utils import preflight
-from .commands import do_generate, do_up, do_down, do_status
+from .commands import do_generate, do_up, do_down, do_status, do_magento_setup
 
 def main() -> None:
     """
@@ -13,6 +13,13 @@ def main() -> None:
     """
     parser = argparse.ArgumentParser(description="Profile-based Docker orchestrator for Magento dev")
     sub = parser.add_subparsers(dest="cmd")
+
+    # For magento-setup
+    p_setup = sub.add_parser("magento-setup", help="Install Mage-OS into ./src (idempotent)")
+    p_setup.add_argument("--reset", action="store_true",
+                         help="Uninstall first, then install (DROPS DB TABLES)")
+    p_setup.add_argument("--with-sample-data", action="store_true",
+                         help="Deploy sample data after install")
 
     p_gen = sub.add_parser("generate", help="Generate docker-compose.yaml (no up)")
     p_gen.add_argument("--profile", choices=PROFILES.keys(), default="full")
@@ -45,5 +52,7 @@ def main() -> None:
         do_down()
     elif args.cmd == "status":
         do_status()
+    elif args.cmd == "magento-setup":
+        do_magento_setup(env, reset=args.reset, with_sample=args.with_sample_data)
     else:
         parser.print_help()
