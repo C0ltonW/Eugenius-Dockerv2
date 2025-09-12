@@ -80,15 +80,15 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
     # 2) Wait for DB/Search
     info("Waiting for DB and Search to be reachable...")
     wait_cmd = r"""
-set -e
-for i in {1..60}; do nc -zv db 3306 >/dev/null 2>&1 && break || sleep 2; done
-for i in {1..60}; do nc -zv search 9200 >/dev/null 2>&1 && break || sleep 2; done
-"""
+        set -e
+        for i in {1..60}; do nc -zv db 3306 >/dev/null 2>&1 && break || sleep 2; done
+        for i in {1..60}; do nc -zv search 9200 >/dev/null 2>&1 && break || sleep 2; done
+        """
     if _dc_exec(wait_cmd) != 0:
         fail("DB/Search were not reachable in time.")
 
     # 3) If already installed and not resetting, exit gracefully
-    if _dc_exec(r"test -f /var/www/html/app/etc/env.php") == 0 and not reset:
+    if _dc_exec("test -f /var/www/html/app/etc/env.php") == 0 and not reset:
         info("Magento already installed (app/etc/env.php found). Nothing to do.")
         info(f"Open: http://{site_host}:{app_port}/")
         return
@@ -97,92 +97,90 @@ for i in {1..60}; do nc -zv search 9200 >/dev/null 2>&1 && break || sleep 2; don
     if reset:
         info("Reset requested: uninstalling & cleaning webroot...")
         uninstall = r"""
-set -e
-cd /var/www/html
-if [ -f bin/magento ]; then
-  php -d detect_unicode=0 bin/magento setup:uninstall -n || true
-fi
-# clean typical Magento artifacts
-rm -rf var/* generated/* pub/static/* app/etc/env.php vendor
-"""
+        set -e
+        cd /var/www/html
+        if [ -f bin/magento ]; then
+          php -d detect_unicode=0 bin/magento setup:uninstall -n || true
+        fi
+        rm -rf var/* generated/* pub/static/* app/etc/env.php vendor
+        """
         _dc_exec(uninstall)
-        # For dev ergonomics: ensure clean webroot before create-project
-        # (bind mount: this clears ./src on host)
+
         full_clean = r"""
-set -e
-cd /var/www/html
-shopt -s dotglob
-rm -rf -- *
-"""
+        set -e
+        cd /var/www/html
+        shopt -s dotglob
+        rm -rf -- *
+        """
         _dc_exec(full_clean)
 
-    # 5) Prepare webroot for create-project:
+    # 5) Prepare webroot
     prep = r"""
-set -e
-cd /var/www/html
-
-# If the only file is the phpinfo stub, remove it
-if [ -f index.php ] && [ "$(wc -c < index.php)" -lt 64 ] && grep -q 'phpinfo' index.php; then
-  rm -f index.php
-fi
-
-# If there is no composer.json but directory is non-empty, refuse (user likely has files here)
-if [ ! -f composer.json ] && [ "$(ls -A | wc -l)" -gt 0 ]; then
-  echo "Refusing to run composer create-project in a non-empty directory."
-  echo "Move/remove files under ./src or run with --reset."
-  exit 11
-fi
-"""
-    rc = _dc_exec(prep)
-    if rc != 0:
+        set -e
+        cd /var/www/html
+        if [ -f index.php ] && [ "$(wc -c < index.php)" -lt 64 ] && grep -q 'phpinfo' index.php; then
+          rm -f index.php
+        fi
+        if [ ! -f composer.json ] && [ "$(ls -A | wc -l)" -gt 0 ]; then
+          echo "Refusing to run composer create-project in a non-empty directory."
+          echo "Move/remove files under ./src or run with --reset."
+          exit 11
+        fi
+        """
+    if _dc_exec(prep) != 0:
         fail("Webroot not suitable for create-project (see message above).")
 
-    # 6) Create project if missing
+    # 6) Create project (Composer or Git fallback)
     create_project = r"""
-set -e
-cd /var/www/html
-if [ ! -f composer.json ]; then
-  composer create-project --repository-url=https://repo.mage-os.org/ mage-os/project-community-edition .
-fi
-"""
+        set -e
+        cd /var/www/html
+        if [ ! -f composer.json ]; then
+          composer create-project --repository-url=https://repo.mage-os.org/ mage-os/project-community-edition . || {
+            echo "Composer create-project failed. Falling back to Git clone..."
+            git clone https://github.com/mage-os/mageos-magento2.git .
+            composer install
+          }
+        fi
+        """
     if _dc_exec(create_project) != 0:
-        fail("Composer create-project failed.")
+        fail("Magento source installation failed.")
 
     # 7) Install Magento
     install = fr"""
-set -e
-cd /var/www/html
-php -d detect_unicode=0 bin/magento setup:install \
-  --base-url="http://{site_host}:{app_port}/" \
-  --db-host=db --db-name={db_name} --db-user={db_user} --db-password={db_pass} \
-  --backend-frontname=admin \
-  --admin-firstname=Admin --admin-lastname=User \
-  --admin-email=admin@example.com --admin-user=admin --admin-password=Admin123! \
-  --language=en_US --currency=USD --timezone=America/New_York \
-  --use-rewrites=1 \
-  --search-engine=elasticsearch7 \
-  --elasticsearch-host=search --elasticsearch-port=9200
-"""
+        set -e
+        cd /var/www/html
+        php -d detect_unicode=0 bin/magento setup:install \
+          --base-url="http://{site_host}:{app_port}/" \
+          --db-host=db --db-name={db_name} --db-user={db_user} --db-password={db_pass} \
+          --backend-frontname=admin \
+          --admin-firstname=Admin --admin-lastname=User \
+          --admin-email=admin@example.com --admin-user=admin --admin-password=Admin123! \
+          --language=en_US --currency=USD --timezone=America/New_York \
+          --use-rewrites=1 \
+          --search-engine=elasticsearch7 \
+          --elasticsearch-host=search --elasticsearch-port=9200
+        """
     if _dc_exec(install) != 0:
         fail("Magento setup:install failed. If database has old tables, re-run with --reset.")
 
     # 8) Optional sample data
     if with_sample:
         sample = r"""
-set -e
-cd /var/www/html
-bin/magento sampledata:deploy
-bin/magento setup:upgrade
-"""
+            set -e
+            cd /var/www/html
+            bin/magento sampledata:deploy
+            bin/magento setup:upgrade
+            """
         if _dc_exec(sample) != 0:
             fail("Sample data deployment failed.")
 
     # 9) Housekeeping
     _dc_exec(r"""
-set -e
-cd /var/www/html
-bin/magento cache:flush
-bin/magento indexer:reindex
-""")
+        set -e
+        cd /var/www/html
+        bin/magento cache:flush
+        bin/magento indexer:reindex
+        """)
 
     info(f"Done. Open: http://{site_host}:{app_port}/")
+
