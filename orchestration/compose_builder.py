@@ -131,7 +131,6 @@ def build_compose(env: Dict[str, str], profile: str) -> Dict:
     volumes = {name: volume_candidates[name] for name in used_volume_names if name in volume_candidates}
 
     compose = {
-        "version": "3.9",
         "name": env.get("COMPOSE_PROJECT_NAME", "magedev"),
         "services": services,
         "volumes": volumes,
