@@ -1,8 +1,9 @@
 FROM php:8.2-fpm
 
-# OS deps for PHP extensions
+# OS deps for PHP extensions + tools used by your scripts (curl, nc)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git unzip libicu-dev libxml2-dev libzip-dev libxslt1-dev \
+    git unzip curl netcat-openbsd \
+    libicu-dev libxml2-dev libzip-dev libxslt1-dev \
     libpng-dev libjpeg-dev libfreetype6-dev libonig-dev \
     libcurl4-openssl-dev pkg-config libssl-dev libsodium-dev \
  && rm -rf /var/lib/apt/lists/*
