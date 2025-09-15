@@ -28,6 +28,8 @@ This repo boots a modular stack (**PHP-FPM, DB, Search, optional Nginx and Redis
    ```bash
    git clone https://github.com/C0ltonW/Eugenius-Dockerv2.git <my-magento>
    cd <my-magento>
+   
+
    ```
 
 2. (Optional) Create templates to customize defaults:
@@ -240,3 +242,46 @@ python orchestrator.py down
 ```
 
 ---
+
+# Update README with:
+
+- docker compose exec php composer install
+### First Install Steps:
+This is the easiest way to install Magento using the built-in orchestrator.
+
+1. Basic Installation
+
+From your project root, run: 
+```
+python -m orchestration magento-setup
+```
+
+This will:
+
+- Bring up the full stack (PHP, DB, Search, Nginx, Redis)
+- Clone Mage‑OS into ./src
+- Run composer install
+- Install Magento with defaults from .env
+- Flush caches and print the site URL
+
+2. Optional Flags
+Install with sample data: 
+```
+python3 orchestrator.py magento-setup --with-sample-data
+```
+This adds Magento’s demo products and categories.
+
+Optionally to drop DB tables and wipe webroot before reinstalling: 
+```
+python3 orchestrator.py magento-setup --reset
+```
+3. Access Your Site
+After installation, open:
+http://127.0.0.1:81/
+
+4. Tip
+If you only need to start the stack without reinstalling Magento run:
+```
+python -m orchestration up --profile <profile>
+```
+
