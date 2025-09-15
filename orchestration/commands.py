@@ -1,6 +1,8 @@
+# orchestration/commands.py
 import subprocess
 from pathlib import Path
 from typing import Dict
+
 from .compose_builder import build_compose
 from .constants import PROFILES
 from .docker_cli import docker_compose_cmd
@@ -9,9 +11,13 @@ from .utils import info, fail, require_pyyaml
 
 def _is_running(service: str) -> bool:
     # returns True if container exists & is running
-    rc = subprocess.call(["docker", "compose", "ps", "-q", service],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    rc = subprocess.call(
+        ["docker", "compose", "ps", "-q", service],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     return rc == 0
+
 
 def _exec(cmd: str) -> int:
     return subprocess.call(["bash", "-lc", cmd])
@@ -21,21 +27,21 @@ def _dc_exec(cmd: str) -> int:
     return subprocess.call(["docker", "compose", "exec", "-T", "php", "bash", "-lc", cmd])
 
 
-
 def write_compose_file(compose: Dict, path: Path) -> None:
     """Serialize Compose dictionary to YAML."""
     require_pyyaml()
     import yaml  # type: ignore
+
     with path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(compose, f, sort_keys=False)
     info(f"Wrote {path}")
-
 
 
 def do_generate(profile: str, env: Dict[str, str]) -> None:
     """Generate docker-compose.yaml for the requested profile."""
     compose = build_compose(env, profile)
     write_compose_file(compose, Path("docker-compose.yaml"))
+
 
 def do_up(profile: str, env: Dict[str, str]) -> None:
     """Generate docker-compose.yaml and bring the stack online."""
@@ -50,12 +56,14 @@ def do_up(profile: str, env: Dict[str, str]) -> None:
     else:
         info("Minimal profile is up (no HTTP). Use Magento CLI inside the 'php' container.")
 
+
 def do_down() -> None:
     """Stop and remove the stack, including named volumes."""
     rc = docker_compose_cmd(["down", "-v"])
     if rc != 0:
         fail("docker compose down failed.")
     info("Stack stopped and volumes removed.")
+
 
 def do_status() -> None:
     """Show docker compose service status."""
@@ -83,7 +91,7 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
         set -e
         for i in {1..60}; do nc -zv db 3306 >/dev/null 2>&1 && break || sleep 2; done
         for i in {1..60}; do nc -zv search 9200 >/dev/null 2>&1 && break || sleep 2; done
-    """
+        """
     if _dc_exec(wait_cmd) != 0:
         fail("DB/Search were not reachable in time.")
 
@@ -121,12 +129,13 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
         if [ -f index.php ] && [ "$(wc -c < index.php)" -lt 64 ] && grep -q 'phpinfo' index.php; then
           rm -f index.php
         fi
+        # refuse to clone into a non-empty dir (fix pipe)
         if [ ! -f composer.json ] && [ "$(ls -A | wc -l)" -gt 0 ]; then
           echo "Refusing to run Git clone in a non-empty directory."
           echo "Move/remove files under ./src or run with --reset."
           exit 11
         fi
-    """
+        """
     if _dc_exec(prep) != 0:
         fail("Webroot not suitable for Git clone (see message above).")
 
@@ -136,9 +145,11 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
         cd /var/www/html
         if [ ! -f composer.json ]; then
           git clone --depth=1 https://github.com/mage-os/mageos-magento2.git .
-          composer install
+          # belt & suspenders: trust the mount path before Composer
+          git config --global --add safe.directory /var/www/html || true
+          composer install --no-interaction --prefer-dist
         fi
-    """
+        """
     if _dc_exec(create_project) != 0:
         fail("Magento source installation failed.")
 
@@ -156,27 +167,28 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
           --use-rewrites=1 \
           --search-engine=elasticsearch7 \
           --elasticsearch-host=search --elasticsearch-port=9200
-    """
+        """
     if _dc_exec(install) != 0:
         fail("Magento setup:install failed. If database has old tables, re-run with --reset.")
 
     # 8) Optional sample data
     if with_sample:
         sample = r"""
-            set -e
-            cd /var/www/html
-            bin/magento sampledata:deploy
-            bin/magento setup:upgrade
+        set -e
+        cd /var/www/html
+        bin/magento sampledata:deploy
+        bin/magento setup:upgrade
         """
         if _dc_exec(sample) != 0:
             fail("Sample data deployment failed.")
 
     # 9) Housekeeping
-    _dc_exec(r"""
+    _dc_exec(
+        r"""
         set -e
         cd /var/www/html
         bin/magento cache:flush
         bin/magento indexer:reindex
-    """)
-
+        """
+    )
     info(f"Done. Open: http://{site_host}:{app_port}/")
