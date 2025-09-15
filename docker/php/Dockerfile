@@ -1,9 +1,10 @@
 # docker/php/Dockerfile
+# Purpose: PHP-FPM image for Magento/Mage-OS local dev with required extensions baked in.
+
+FROM php:8.2-fpm
 
 # Fail a layer if any command in a pipeline fails.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
-FROM php:8.2-fpm
 
 # ------------------------------------------------------------
 # OS deps for PHP extensions + basic tooling (git, unzip, curl, nc)
@@ -40,12 +41,13 @@ ENV COMPOSER_ALLOW_SUPERUSER=1
 
 # ------------------------------------------------------------
 # Pre-trust bind mount to avoid 'dubious ownership' (git)
+# (also set at runtime in magento-setup for belt & suspenders)
 # ------------------------------------------------------------
 RUN git config --system safe.directory /var/www/html || true \
  && git config --global --add safe.directory /var/www/html || true
 
 # ------------------------------------------------------------
-# PHP settings (tweak as needed)
+# Dev-friendly PHP settings (tweak as needed)
 # ------------------------------------------------------------
 RUN { \
   echo 'memory_limit=2G'; \
@@ -56,3 +58,4 @@ RUN { \
 
 # Workdir used by Nginx/PHP-FPM and your setup routines
 WORKDIR /var/www/html
+
