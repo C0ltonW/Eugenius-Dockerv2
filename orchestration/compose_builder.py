@@ -1,4 +1,5 @@
 from typing import Dict
+from pathlib import Path
 from .constants import PROFILES
 from .nginx import ensure_nginx_conf, ensure_src_stub
 
@@ -50,6 +51,9 @@ def build_compose(env: Dict[str, str], profile: str) -> Dict:
             "depends_on": [],
             "restart": "unless-stopped",
         }
+        # Auto-build local PHP image if Dockerfile is present.
+        if Path("./docker/php/Dockerfile").exists():
+            services["php"]["build"] = {"context": "./docker/php"}
 
     # db
     if "db" in PROFILES[profile]:
