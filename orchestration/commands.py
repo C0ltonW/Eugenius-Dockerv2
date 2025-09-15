@@ -71,6 +71,8 @@ def do_status() -> None:
     raise SystemExit(rc)
 
 
+# orchestration/commands.py (inside do_magento_setup)
+
 def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool = False) -> None:
     # 1) Ensure stack is up
     if not _is_running("php"):
@@ -113,7 +115,6 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
         rm -rf var/* generated/* pub/static/* app/etc/env.php vendor
         """
         _dc_exec(uninstall)
-
         full_clean = r"""
         set -e
         cd /var/www/html
@@ -126,10 +127,11 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
     prep = r"""
         set -e
         cd /var/www/html
+        # remove tiny phpinfo stub if present
         if [ -f index.php ] && [ "$(wc -c < index.php)" -lt 64 ] && grep -q 'phpinfo' index.php; then
           rm -f index.php
         fi
-        # refuse to clone into a non-empty dir (fix pipe)
+        # refuse to clone into a non-empty dir (safety)
         if [ ! -f composer.json ] && [ "$(ls -A | wc -l)" -gt 0 ]; then
           echo "Refusing to run Git clone in a non-empty directory."
           echo "Move/remove files under ./src or run with --reset."
@@ -145,13 +147,28 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
         cd /var/www/html
         if [ ! -f composer.json ]; then
           git clone --depth=1 https://github.com/mage-os/mageos-magento2.git .
-          # belt & suspenders: trust the mount path before Composer
+          # trust the mount path before Composer
           git config --global --add safe.directory /var/www/html || true
           composer install --no-interaction --prefer-dist
         fi
         """
     if _dc_exec(create_project) != 0:
         fail("Magento source installation failed.")
+
+    # ----------------------------------------------------------------------
+    # >>> ADD THIS: ensure writable runtime dirs BEFORE setup:install
+    # ----------------------------------------------------------------------
+    perm_fix = r"""
+        set -e
+        cd /var/www/html
+        mkdir -p var/cache var/page_cache var/di generated pub/static pub/media app/etc
+        # Best-effort chown; on some bind mounts this may no-op (that's OK)
+        chown -R www-data:www-data var generated pub/static pub/media app/etc || true
+        # Directories: setgid + group write; Files: rw for owner/group
+        find var generated pub/static pub/media app/etc -type d -exec chmod 2775 {} \;
+        find var generated pub/static pub/media app/etc -type f -exec chmod 664 {} \;
+        """
+    _dc_exec(perm_fix)
 
     # 7) Install Magento
     install = fr"""
@@ -181,6 +198,9 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
         """
         if _dc_exec(sample) != 0:
             fail("Sample data deployment failed.")
+
+    # (optional) Re-assert permissions for any new files after install/sample
+    _dc_exec(perm_fix)
 
     # 9) Housekeeping
     _dc_exec(
