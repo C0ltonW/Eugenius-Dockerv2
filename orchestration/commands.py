@@ -83,7 +83,7 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
         set -e
         for i in {1..60}; do nc -zv db 3306 >/dev/null 2>&1 && break || sleep 2; done
         for i in {1..60}; do nc -zv search 9200 >/dev/null 2>&1 && break || sleep 2; done
-        """
+    """
     if _dc_exec(wait_cmd) != 0:
         fail("DB/Search were not reachable in time.")
 
@@ -122,26 +122,23 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
           rm -f index.php
         fi
         if [ ! -f composer.json ] && [ "$(ls -A | wc -l)" -gt 0 ]; then
-          echo "Refusing to run composer create-project in a non-empty directory."
+          echo "Refusing to run Git clone in a non-empty directory."
           echo "Move/remove files under ./src or run with --reset."
           exit 11
         fi
-        """
+    """
     if _dc_exec(prep) != 0:
-        fail("Webroot not suitable for create-project (see message above).")
+        fail("Webroot not suitable for Git clone (see message above).")
 
-    # 6) Create project (Composer or Git fallback)
+    # 6) Create project (Git only)
     create_project = r"""
         set -e
         cd /var/www/html
         if [ ! -f composer.json ]; then
-          composer create-project --repository-url=https://repo.mage-os.org/ mage-os/project-community-edition . || {
-            echo "Composer create-project failed. Falling back to Git clone..."
-            git clone https://github.com/mage-os/mageos-magento2.git .
-            composer install
-          }
+          git clone --depth=1 https://github.com/mage-os/mageos-magento2.git .
+          composer install
         fi
-        """
+    """
     if _dc_exec(create_project) != 0:
         fail("Magento source installation failed.")
 
@@ -159,7 +156,7 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
           --use-rewrites=1 \
           --search-engine=elasticsearch7 \
           --elasticsearch-host=search --elasticsearch-port=9200
-        """
+    """
     if _dc_exec(install) != 0:
         fail("Magento setup:install failed. If database has old tables, re-run with --reset.")
 
@@ -170,7 +167,7 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
             cd /var/www/html
             bin/magento sampledata:deploy
             bin/magento setup:upgrade
-            """
+        """
         if _dc_exec(sample) != 0:
             fail("Sample data deployment failed.")
 
@@ -180,7 +177,6 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
         cd /var/www/html
         bin/magento cache:flush
         bin/magento indexer:reindex
-        """)
+    """)
 
     info(f"Done. Open: http://{site_host}:{app_port}/")
-
