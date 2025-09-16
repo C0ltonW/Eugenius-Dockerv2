@@ -182,7 +182,7 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
           --admin-email=admin@example.com --admin-user=admin --admin-password=Admin123! \
           --language=en_US --currency=USD --timezone=America/New_York \
           --use-rewrites=1 \
-          --search-engine=elasticsearch \
+          --search-engine=elasticsearch8 \
           --elasticsearch-host=search --elasticsearch-port=9200
         """
     if _dc_exec(install) != 0:
@@ -209,8 +209,10 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
         r"""
         set -e
         cd /var/www/html
+        php bin/magento setup:static-content:deploy -f
         bin/magento cache:flush
         bin/magento indexer:reindex
         """
+
     )
     info(f"Done. Open: http://{site_host}:{app_port}/")
