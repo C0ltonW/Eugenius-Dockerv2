@@ -42,18 +42,22 @@ def build_compose(env: Dict[str, str], profile: str) -> Dict:
     # candidate named volumes; we'll include only those actually referenced
     volume_candidates = {"dbdata": {}, "searchdata": {}, "rediscache": {}}
 
-    # php (FPM)
     if "php" in PROFILES[profile]:
         services["php"] = {
-            "image": env.get("PHP_IMAGE", "php:8.2-fpm"),
             "working_dir": "/var/www/html",
             "volumes": ["./src:/var/www/html"],
             "depends_on": [],
             "restart": "unless-stopped",
         }
-        # Auto-build local PHP image if Dockerfile is present.
+
+        # If a local Dockerfile exists, build it and give it a distinct local tag.
         if Path("./docker/php/Dockerfile").exists():
             services["php"]["build"] = {"context": "./docker/php"}
+            local_tag = f"{env.get('COMPOSE_PROJECT_NAME', 'magedev')}-php:dev"
+            services["php"]["image"] = local_tag
+        else:
+            services["php"]["image"] = env.get("PHP_IMAGE", "php:8.2-fpm")
+    # Fall back to the env-provided image (e.g., php:8.2-fpm)
 
     # db
     if "db" in PROFILES[profile]:

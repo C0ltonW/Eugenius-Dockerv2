@@ -25,10 +25,14 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
     simplexml soap xsl zip sodium sockets ftp
 
 # ------------------------------------------------------------
-# Redis PHP extension (recommended for local dev)
+# Redis PHP extension (recommended for local dev) — idempotent
 # ------------------------------------------------------------
-RUN pecl install redis \
- && docker-php-ext-enable redis
+RUN if ! php -m | grep -qi '^redis$'; then \
+      pecl install -o -f redis && docker-php-ext-enable redis; \
+    else \
+      echo "php-redis already installed; enabling if needed"; \
+      docker-php-ext-enable redis || true; \
+    fi
 
 # ------------------------------------------------------------
 # Composer (global)

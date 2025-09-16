@@ -91,9 +91,23 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
     info("Waiting for DB and Search to be reachable...")
     wait_cmd = r"""
         set -e
-        for i in {1..60}; do nc -zv db 3306 >/dev/null 2>&1 && break || sleep 2; done
-        for i in {1..60}; do nc -zv search 9200 >/dev/null 2>&1 && break || sleep 2; done
-        """
+        # Wait for DB (port 3306)
+        ok=0
+        for i in {1..90}; do
+          (echo > /dev/tcp/db/3306) >/dev/null 2>&1 && ok=1 && break || true
+          sleep 2
+        done
+        test "$ok" = "1" || { echo "DB not reachable"; exit 12; }
+    
+        # Wait for Search (port 9200)
+        ok=0
+        for i in {1..90}; do
+          (echo > /dev/tcp/search/9200) >/dev/null 2>&1 && ok=1 && break || true
+          sleep 2
+        done
+        test "$ok" = "1" || { echo "Search not reachable"; exit 13; }
+    """
+
     if _dc_exec(wait_cmd) != 0:
         fail("DB/Search were not reachable in time.")
 
