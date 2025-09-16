@@ -59,6 +59,7 @@ def build_compose(env: Dict[str, str], profile: str) -> Dict:
     if "db" in PROFILES[profile]:
         services["db"] = {
             "image": env.get("DB_IMAGE", "mariadb:10.6"),
+            "command": "--log-bin-trust-function-creators=1",
             "environment": {
                 "MYSQL_ROOT_PASSWORD": env.get("MYSQL_ROOT_PASSWORD", "root"),
                 "MYSQL_DATABASE": env.get("MYSQL_DATABASE", "magento"),
