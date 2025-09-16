@@ -6,7 +6,7 @@ from typing import Dict
 from .compose_builder import build_compose
 from .constants import PROFILES
 from .docker_cli import docker_compose_cmd
-from .utils import info, fail, require_pyyaml
+from .utils import info, fail, require_pyyaml, warn
 
 
 def _is_running(service: str) -> bool:
@@ -182,10 +182,12 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
           --admin-email=admin@example.com --admin-user=admin --admin-password=Admin123! \
           --language=en_US --currency=USD --timezone=America/New_York \
           --use-rewrites=1 \
-          --search-engine=elasticsearch7 \
+          --search-engine=elasticsearch \
           --elasticsearch-host=search --elasticsearch-port=9200
         """
     if _dc_exec(install) != 0:
+        warn("Magento setup:install failed. Attempting to disable maintenance mode...")
+        _dc_exec("php bin/magento maintenance:disable || true")
         fail("Magento setup:install failed. If database has old tables, re-run with --reset.")
 
     # 8) Optional sample data
