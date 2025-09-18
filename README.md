@@ -43,7 +43,7 @@ It provisions a full Magento development environment with **PHP-FPM, MySQL/Maria
     pip install pyyaml
 
 ### 4. Start the stack (default: full profile)
-> Note: Running python orchestrator.py with no args is equivalent to up --profile full.
+> Note: Running python orchestrator.py with no args is equivalent to `up --profile full`.
 
     python orchestrator.py
     # or
