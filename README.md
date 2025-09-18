@@ -28,12 +28,36 @@ It provisions a full Magento development environment with **PHP-FPM, MySQL/Maria
 
 ## Quick Start
 
+### 0. Bootstrapping (If needed) 
+    #!/bin/bash
+
+    # Update package list and install required tools: Git, Docker, Python 3.12, pip, and Docker Compose v2
+    sudo apt update
+    sudo apt install -y git docker.io python3.12 python3-pip docker-compose-v2
+    
+    # Start Docker service
+    sudo service docker start
+    
+    # Add user to Docker group to avoid needing sudo for Docker commands
+    sudo usermod -aG docker $USER
+    
+    # Set vm.max_map_count for Elasticsearch/OpenSearch compatibility
+    sudo sysctl -w vm.max_map_count=262144
+    
+    # Create a projects directory in the WSL filesystem for performance
+    mkdir -p ~/projects
+    cd ~/projects
+    
+    # Install Python dependency pyyaml
+    pip3 install pyyaml
+
+
 ### 1. Clone the repo
     git clone https://github.com/C0ltonW/Eugenius-Dockerv2.git my-magento
     cd my-magento
 
 ### 2. (Optional) Create a virtual environment
-> You likely won't need this. For setups that explicitly need one.
+> You likely won't need this. This is for setups that explicitly need one.
 
     python -m venv .venv
     source .venv/bin/activate   # Linux/WSL
