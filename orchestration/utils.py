@@ -51,5 +51,5 @@ def preflight(env: Dict[str, str], profile: str) -> None:
     if uses_search and ("opensearch" in search_img or "elasticsearch" in search_img):
         if on_windows or on_wsl:
             info("Reminder (Windows/WSL2): set vm.max_map_count=262144 before starting search:")
-            info("  PowerShell → wsl -d docker-desktop sysctl -w vm.max_map_count=262144")
+            info("  PowerShell -> wsl -d docker-desktop sysctl -w vm.max_map_count=262144")
             info("  (Persist via C:\\Users\\<you>\\.wslconfig if desired)")

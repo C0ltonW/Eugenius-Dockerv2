@@ -64,7 +64,7 @@ server {
   }
 
   # Static assets
-  location ~* \.(jpg|jpeg|png|gif|css|js|ico|svg|webp|avif)$ {
+  location ~* \\.(jpg|jpeg|png|gif|css|js|ico|svg|webp|avif)$ {
     try_files $uri =404;
     expires 1h;
     access_log off;
@@ -79,7 +79,7 @@ server {
   }
 
   # PHP-FPM
-  location ~ \.php$ {
+  location ~ \\.php$ {
     try_files $uri =404;
     include fastcgi_params;
     fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
@@ -91,7 +91,7 @@ server {
   }
 
   # Deny access to sensitive files
-  location ~* (\.git|\.env|composer\.(json|lock)|auth\.json|package\.json|phpunit\.xml) {
+  location ~* (\\.git|\\.env|composer\\.(json|lock)|auth\\.json|package\\.json|phpunit\\.xml) {
     deny all;
   }
 }

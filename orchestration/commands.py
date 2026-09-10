@@ -3,20 +3,23 @@ import subprocess
 from pathlib import Path
 from typing import Dict
 
-from .compose_builder import build_compose
+from .compose_builder import build_compose, detect_search_flavor
 from .constants import PROFILES
 from .docker_cli import docker_compose_cmd
 from .utils import info, fail, require_pyyaml, warn
 
 
 def _is_running(service: str) -> bool:
-    # returns True if container exists & is running
-    rc = subprocess.call(
-        ["docker", "compose", "ps", "-q", service],
-        stdout=subprocess.DEVNULL,
+    # returns True only if the service resolves to an actual running container.
+    # `docker compose ps -q` exits 0 as long as a compose file exists, even when
+    # the service has no container, so we must check stdout, not just the rc.
+    result = subprocess.run(
+        ["docker", "compose", "ps", "--status", "running", "-q", service],
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        text=True,
     )
-    return rc == 0
+    return result.returncode == 0 and bool(result.stdout.strip())
 
 
 def _exec(cmd: str) -> int:
@@ -73,11 +76,11 @@ def do_status() -> None:
 
 # orchestration/commands.py (inside do_magento_setup)
 
-def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool = False) -> None:
+def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool = False, profile: str = "full") -> None:
     # 1) Ensure stack is up
     if not _is_running("php"):
-        info("Stack is not running; bringing it up (full profile).")
-        do_up("full", env)
+        info(f"Stack is not running; bringing it up ({profile} profile).")
+        do_up(profile, env)
     else:
         info("Stack detected as running.")
 
@@ -94,15 +97,15 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
         # Wait for DB (port 3306)
         ok=0
         for i in {1..90}; do
-          (echo > /dev/tcp/db/3306) >/dev/null 2>&1 && ok=1 && break || true
+          nc -z db 3306 >/dev/null 2>&1 && ok=1 && break || true
           sleep 2
         done
         test "$ok" = "1" || { echo "DB not reachable"; exit 12; }
-    
+
         # Wait for Search (port 9200)
         ok=0
         for i in {1..90}; do
-          (echo > /dev/tcp/search/9200) >/dev/null 2>&1 && ok=1 && break || true
+          nc -z search 9200 >/dev/null 2>&1 && ok=1 && break || true
           sleep 2
         done
         test "$ok" = "1" || { echo "Search not reachable"; exit 13; }
@@ -145,6 +148,10 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
         if [ -f index.php ] && [ "$(wc -c < index.php)" -lt 64 ] && grep -q 'phpinfo' index.php; then
           rm -f index.php
         fi
+        # Remove common OS/sync-tool cruft (desktop.ini, Thumbs.db, .DS_Store) that
+        # Windows/OneDrive drop into bind-mounted folders. Left in place, these make
+        # the dir look "non-empty" below and also make `git clone` itself refuse to run.
+        find . -maxdepth 1 -type f \( -iname 'desktop.ini' -o -iname 'Thumbs.db' -o -iname '.DS_Store' \) -delete
         # refuse to clone into a non-empty dir (safety)
         if [ ! -f composer.json ] && [ "$(ls -A | wc -l)" -gt 0 ]; then
           echo "Refusing to run Git clone in a non-empty directory."
@@ -185,6 +192,16 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
     _dc_exec(perm_fix)
 
     # 7) Install Magento
+    # Match the search engine flag to the actual SEARCH_IMAGE that was started
+    # (compose_builder.build_compose() uses this same detection to configure the
+    # 'search' service), instead of assuming Elasticsearch regardless of config.
+    search_flavor = detect_search_flavor(env.get("SEARCH_IMAGE", ""))
+    if search_flavor == "opensearch":
+        search_engine = "opensearch"
+        search_host_flags = "--opensearch-host=search --opensearch-port=9200"
+    else:
+        search_engine = "elasticsearch8"
+        search_host_flags = "--elasticsearch-host=search --elasticsearch-port=9200"
     install = fr"""
         set -e
         cd /var/www/html
@@ -196,8 +213,8 @@ def do_magento_setup(env: Dict[str, str], reset: bool = False, with_sample: bool
           --admin-email=admin@example.com --admin-user=admin --admin-password=Admin123! \
           --language=en_US --currency=USD --timezone=America/New_York \
           --use-rewrites=1 \
-          --search-engine=elasticsearch8 \
-          --elasticsearch-host=search --elasticsearch-port=9200
+          --search-engine={search_engine} \
+          {search_host_flags}
         """
     if _dc_exec(install) != 0:
         warn("Magento setup:install failed. Attempting to disable maintenance mode...")

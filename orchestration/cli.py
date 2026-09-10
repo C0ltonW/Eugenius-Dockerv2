@@ -20,6 +20,8 @@ def main() -> None:
                          help="Uninstall first, then install (DROPS DB TABLES)")
     p_setup.add_argument("--with-sample-data", action="store_true",
                          help="Deploy sample data after install")
+    p_setup.add_argument("--profile", choices=PROFILES.keys(), default="full",
+                         help="Profile to start if the stack isn't already running (default: full)")
 
     p_gen = sub.add_parser("generate", help="Generate docker-compose.yaml (no up)")
     p_gen.add_argument("--profile", choices=PROFILES.keys(), default="full")
@@ -53,6 +55,6 @@ def main() -> None:
     elif args.cmd == "status":
         do_status()
     elif args.cmd == "magento-setup":
-        do_magento_setup(env, reset=args.reset, with_sample=args.with_sample_data)
+        do_magento_setup(env, reset=args.reset, with_sample=args.with_sample_data, profile=args.profile)
     else:
         parser.print_help()
